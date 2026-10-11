@@ -1,0 +1,107 @@
+# ============================================================================
+# moomoo-watch · Airflow（**离线 fixture 版**）
+#
+# 目标：在容器里把 moomoo-watch 那条管道**按依赖图**跑起来 —— 可复现、可 backfill。
+# ⚠️ 这**不是**生产迁移：容器够不到 OpenD（127.0.0.1:11111）与 claude.exe，所以
+#    数据源锁死 fixture、子代理关掉、推送 simulate。真机的 Windows 计划任务**不动**。
+#
+# 用法（本仓库独立成仓，moomoo-watch 需克隆在**同级目录**）：
+#   git clone https://github.com/Zarrc/moomoo-watch   # 兄弟目录；下面 ../moomoo-watch 由此而来
+#   mkdir -p .sandbox/vault                            # Windows 上 .sandbox 若已是 junction 则跳过
+#   cp .env.airflow.example .env                       # 可选：设 AIRFLOW_UID / FERNET_KEY
+#   docker compose up -d && docker compose ps
+#   http://localhost:8080  （admin / admin）
+#
+# 布局（对齐 core 的路径契约，R1）：
+#   宿主 ./.sandbox/vault  ←→  容器 /vault            （RW：沙箱，合成「vault 根」）
+#   宿主 ../moomoo-watch   ←→  容器 /vault/project     （RO：仓库本体，绝不写回）
+#   /vault/.claude/ 是 find_vault_root() 的锚点，由 docker/init-vault.sh 建。
+# ============================================================================
+---
+name: moomoo-airflow
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5-python3.12}
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # R3：把「默认时区」钉在 +08:00，配合 DAG 里显式 tz 的 start_date。
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Shanghai
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Asia/Shanghai
+    # dags 目录上 sys.path → `from lib import stages` 可用（DAG 文件里的绝对导入）
+    PYTHONPATH: /opt/airflow/dags
+    # 适配层的三个锚点（lib/env.py 读它们；默认值同此，写出来是为了显式）
+    MOOMOO_PROJECT_ROOT: /vault/project
+    MOOMOO_WATCH_CONFIG: /vault/scratch/config.yaml
+    MOOMOO_WATCH_ENV: /vault/scratch/.env
+    MOOMOO_VAULT: /vault
+    # 可选：给容器临时补装依赖（fixture 模式**不需要**；切 source=futu 时才用）
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+  volumes:
+    - ./dags:/opt/airflow/dags                 # DAG + 适配层（RW；Airflow 需要能读写 pyc）
+    - ./docker:/opt/airflow/docker:ro          # init-vault.sh 等
+    - ./.sandbox/airflow-logs:/opt/airflow/logs  # ⚠️ 别挂 ../moomoo-watch/logs：那是 moomoo 自己的日志目录
+    - ../moomoo-watch:/vault/project:ro          # 🔒 仓库**只读** —— 产物永不写回公开目录（需克隆在同级）
+    - ./.sandbox/vault:/vault                   # 合成 vault 沙箱（RW）
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - ./.sandbox/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 一次性初始化：建合成 vault → 迁移库 → 建串行池 → 建管理员
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        bash /opt/airflow/docker/init-vault.sh
+        airflow db migrate
+        # R2/R7：写共享产物（data/outbox/state）的任务互斥。
+        # 🚩 **这一步不能吞错**：任务挂在不存在的池上时 Airflow **既不报错也不调度**它
+        #    —— 静默的「DAG 绿不了」。这里不用 `|| true`，失败就该让 init 红。
+        #    实测 2.10.5：description 是**必填位置参数**（不传 → exit 2，init 直接红——正确行为）。
+        airflow pools set moomoo_serial 1 "moomoo-watch serial writers: data/outbox/state"
+        airflow pools list | grep -q moomoo_serial
+        echo "[airflow-init] pool moomoo_serial 就位"
+        airflow users create --role Admin --username admin --password admin \
+          --firstname admin --lastname admin --email admin@example.com || true
+        echo "[airflow-init] 完成"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always

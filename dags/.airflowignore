@@ -1,0 +1,7 @@
+# DagBag 只该扫「DAG 文件」，不该把适配层当 DAG 解析。
+#
+# 为什么需要它：`dags/` 下的每个 .py 都会被 DagBag 递归 import 一遍（每 ~30s 一次）。
+# lib/ 里没有 DAG，解析它们只是浪费时间；万一某个 lib 模块在 import 期出错，
+# 还会让**整个 dags 目录**报 import error。忽略掉最干净。
+# （被忽略只影响「扫描」，不影响 DAG 文件里的 `from lib import stages`。）
+lib/

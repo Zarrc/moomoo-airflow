@@ -1,0 +1,10 @@
+# 沙箱：postgres 数据 / Airflow 日志 / 合成 vault 产物
+# （Windows 上 .sandbox 通常是指向 OneDrive 之外位置的 junction —— 本体更不该进 git）
+.sandbox/
+
+# 本地环境（示例文件 .env.airflow.example 会进仓库）
+.env
+
+# Python
+__pycache__/
+*.pyc

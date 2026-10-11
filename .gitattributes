@@ -1,0 +1,2 @@
+# 本仓库文件会被 Linux 容器直接挂载执行 —— 全库钉死 LF，防 Windows autocrlf 破坏 shell 脚本
+* text=auto eol=lf

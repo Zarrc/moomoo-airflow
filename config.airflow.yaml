@@ -1,0 +1,148 @@
+# ============================================================================
+# moomoo-watch 配置 —— **容器专用**（Airflow 那套跑的就是这份）
+#
+# 与项目根的 config.yaml 差在哪（其余字段**逐字相同**，改 core 行为时两边一起改）：
+#   1) source: fixture      → 离线样例，不连 OpenD（容器够不到 127.0.0.1:11111）
+#   2) mode: simulate       → 不真发推送
+#   3) agent.enabled: false → 容器里没有 claude.exe，子代理跑不了
+#   4) paths.* 用**绝对路径** → 见下（这是整套沙箱能成立的关键）
+#   5) 末尾多一节 airflow:   → 适配层自己的开关
+#
+# 📌 密钥：仍然走仓库**外**的 .env（容器里指向 /vault/scratch/.env）。
+#    simulate 模式不需要任何密钥；live 才需要。
+# ============================================================================
+
+# --- 运行模式 ---------------------------------------------------------------
+mode: simulate            # 容器里**永远**是 simulate：这是一套可复现的**演示**，不是生产
+source: fixture           # fixture = 读 /vault/project/fixtures/*，全链路离线、确定性
+
+# --- moomoo / OpenD（fixture 模式不连，保留字段是为了与 config.yaml 对齐）-----
+moomoo:
+  host: "127.0.0.1"
+  port: 11111
+  security_firm: ""
+  account_market: "US"
+  markets: ["US"]
+  watchlist:
+    - "US.GLD"
+    - "US.SPY"
+    - "US.AAPL"
+
+# --- 风险口径 ---------------------------------------------------------------
+risk:
+  equity: 10000.0
+  max_position_pct: 0.35
+  stale_data_minutes: 30
+
+# --- 指标参数 ---------------------------------------------------------------
+indicators:
+  kline: "K_60M"
+  max_count: 200
+  ma_period: 50
+  atr_period: 14
+  rsi_period: 14
+  volume_avg_period: 20
+
+# --- 宏观事件日历 -----------------------------------------------------------
+calendar:
+  enabled: true
+  alert_window_minutes: 60
+  alert_min_lead_minutes: 5
+  lookahead_days: 10
+  past_minutes: 120
+  max_pages: 6
+  max_items: 40
+  high_risk_keywords: ["CPI", "PPI", "NFP", "Nonfarm", "FOMC", "Interest Rate",
+                       "GDP", "PCE", "Unemployment", "Retail Sales"]
+
+# --- 宏观数据 ---------------------------------------------------------------
+macro:
+  enabled: true
+  fed_watch: true
+  dot_plot: true
+  indicators: ["CPI_YOY", "CORE_CPI_YOY", "PCE_YOY", "UNRATE", "NFP_CHANGE",
+               "FEDFUNDS_TARGET", "US10Y", "WTI_OIL", "GOLD"]
+  history_periods: 24
+
+# --- 多周期回滚 + 可证伪预测台账 ---------------------------------------------
+rollup:
+  enabled: true
+  session_boundary_hour: 9
+  market_holidays: []
+  call_instruments: ["US.SPY", "US.GLD"]
+  keep_days: 400
+  max_backfill_days: 10
+  # ⚠️ 首跑保护：留 seed。backfill 时「周报不出现」正是它的**正确行为**（见 README §4）。
+  bootstrap_mode: "seed"
+  max_backfill_periods: {weekly: 4, monthly: 2, quarterly: 1, yearly: 1}
+  refresh_call_same_session: false
+  periods:
+    daily: {enabled: true, push: true}
+    weekly: {enabled: true, push: true}
+    monthly: {enabled: true, push: true}
+    quarterly: {enabled: true, push: true, summary_only: true}
+    yearly: {enabled: true, push: true}
+  ledger:
+    score_deadband_pct: 0.1
+    max_score_lag_days: 7
+
+# --- 新闻 / 公告 ------------------------------------------------------------
+news:
+  enabled: true
+  endpoint: "https://ai-news-search.moomoo.com/news_search"   # fixture 源不联网，此值用不上
+  lang: "en"
+  news_type: 1
+  per_keyword: 8
+  max_items: 12
+  keywords: []
+
+# --- 推送 -------------------------------------------------------------------
+push:
+  routing:
+    high: telegram
+    normal: serverchan
+  fallback: true
+  timeout_seconds: 15
+  cooldown_minutes: 30
+  high_priority_bypass: true
+  channels:
+    serverchan:
+      max_per_day: 5
+      env_key: "SERVERCHAN_SENDKEY"
+    telegram:
+      max_per_day: 0
+      env_token: "TELEGRAM_BOT_TOKEN"
+      env_chat: "TELEGRAM_CHAT_ID"
+    pushplus:
+      max_per_day: 0
+      env_key: "PUSHPLUS_TOKEN"
+
+# --- 子代理（容器里关掉）----------------------------------------------------
+agent:
+  enabled: false          # 容器够不到 claude.exe → 一到 summarize 就返回「agent.enabled = false」
+  claude_exe: "/nonexistent/claude"   # 占位；enabled=false 时不会被用到
+  agent_name: "portfolio-watch"
+  permission_mode: "acceptEdits"
+  model: ""
+  timeout_seconds: 300
+  report_timeout_seconds: 900
+
+# --- 路径 -------------------------------------------------------------------
+# 🔑 全部**绝对路径**（fixtures 除外）——这是「仓库只读挂载」的支点：
+#    pathlib 语义 `Path("/a") / "/b" == "/b"`，绝对路径会丢弃 PROJECT_ROOT(/vault/project)。
+#    于是 core 照常 `PROJECT_ROOT / rel`，产物却全落进 /vault/scratch/ 沙箱，
+#    一个字节都写不回会被公开的仓库目录。
+paths:
+  data: "/vault/scratch/data"          # 脚本写、子代理读（latest.json / report_<pk>.json）
+  outbox: "/vault/scratch/outbox"      # 运行时会被适配层覆写成 .../<run_key>/<slot>（隔离写者）
+  logs: "/vault/scratch/logs"
+  state: "/vault/scratch/state.json"
+  fixtures: "fixtures"                 # 留**相对** → /vault/project/fixtures（仓库只读挂载）
+  rollup: "/vault/scratch/rollup"      # 日记录 / 台账 / 命中率 / 水位
+  vault_invest: "Self/投资"             # 相对 **vault 根** → /vault/Self/投资（**沙箱**，不碰真 vault）
+
+# --- Airflow 适配层自己的开关（core 不认这一节）-----------------------------
+airflow:
+  # alert DAG 的 gate：预警窗口内没有高险事件就短路（省掉一次无用的子代理调用）。
+  # 这是**唯一一处刻意的行为增强**；设 false → 回到与 main.py 完全一致的 parity 行为。
+  shortcircuit_alert: true

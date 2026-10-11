@@ -1,0 +1,15 @@
+# ============================================================================
+# 容器里要补装的依赖 —— **有意留空**。
+#
+# fixture 模式下 core 只用到：
+#   - PyYAML    （core/config.py, core/rollup.py）—— Airflow 镜像自带
+#   - requests  （core/news.py, core/notifier.py）—— Airflow 镜像自带
+# 其余全是标准库。`futu` 是**懒导入**（只在 source=futu 的分支里才 import），
+# 所以 fixture 模式**不需要** futu-api / pandas。
+#
+# 切真机数据源时解开下面两行（futu-api 硬依赖 pandas）：
+# futu-api>=10.11
+# pandas>=2.0
+#
+# 等价的最快方式（不重建镜像）：docker-compose.yaml 里设
+#   _PIP_ADDITIONAL_REQUIREMENTS="futu-api pandas"
